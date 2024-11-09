@@ -11,7 +11,11 @@ import json
 import os
 import scipy.stats as stats
 from sklearn.metrics import jaccard_score
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from textblob import TextBlob
 from tqdm import tqdm
+from functools import lru_cache
 
 # Download NLTK data files (only required once)
 nltk.download('punkt')
@@ -29,7 +33,7 @@ else:
     url_cache = {}
 
 # Variable to limit the number of articles imported to analyze
-MAX_ARTICLES = 10
+MAX_ARTICLES = 20
 # Variable to limit the minimum sentence length for analysis (after stop words are removed)
 MIN_SENTENCE_LENGTH = 8
 # Stop words set
@@ -39,6 +43,7 @@ def save_cache():
     with open(CACHE_FILE, 'w') as cache_file:
         json.dump(url_cache, cache_file)
 
+@lru_cache(maxsize=None)
 def align_sentences(sentence1, sentence2):
     words1 = sentence1.split()
     words2 = sentence2.split()
@@ -111,6 +116,7 @@ def grab_and_clean_text_from_website(url):
     except requests.exceptions.RequestException as e:
         return f"An error occurred: {e}"
 
+@lru_cache(maxsize=None)
 def remove_stop_words(sentence):
     # Tokenize the sentence
     tokens = word_tokenize(sentence)
@@ -118,6 +124,7 @@ def remove_stop_words(sentence):
     filtered_tokens = [word for word in tokens if word.lower() not in STOP_WORDS]
     return ' '.join(filtered_tokens)
 
+@lru_cache(maxsize=None)
 def convert_sentence_to_grammar_tokens(sentence):
     # Tokenize the sentence
     tokens = word_tokenize(sentence)
@@ -162,8 +169,14 @@ def read_urls_from_file(file_path):
     except FileNotFoundError as e:
         return f"An error occurred: {e}"
 
+def perform_sentiment_analysis(text):
+    blob = TextBlob(text)
+    sentiment_score = (blob.sentiment.polarity + 1) * 50  # Convert range from [-1, 1] to [0, 100]
+    return sentiment_score
+
 def compare_articles(urls):
     sentences_by_url = {}
+    sentiment_scores = {}
 
     # Step 1: Extract and tokenize sentences for each URL
     for url in tqdm(urls, desc="Extracting and tokenizing sentences"):
@@ -176,7 +189,10 @@ def compare_articles(urls):
             if len(filtered_sentence.split()) >= MIN_SENTENCE_LENGTH:
                 filtered_sentences.append(filtered_sentence)
         tokenized_sentences = [convert_sentence_to_grammar_tokens(sentence) for sentence in filtered_sentences]
-        sentences_by_url[url] = {'tokenized': tokenized_sentences}
+        sentences_by_url[url] = {'tokenized': tokenized_sentences, 'filtered_sentences': filtered_sentences}
+
+        # Perform sentiment analysis on the raw text
+        sentiment_scores[url] = perform_sentiment_analysis(cleaned_text)
 
     # Step 2: Pairwise comparison between articles
     results = []
@@ -186,6 +202,7 @@ def compare_articles(urls):
             url1, url2 = urls_list[i], urls_list[j]
             levenstein_distances = []
             jaccard_distances = []
+            cosine_similarities = []
 
             # Compare grammar tokenized sentences
             for sent1 in tqdm(sentences_by_url[url1]['tokenized'], desc=f"Comparing tokenized sentences between {url1} and {url2}", leave=False):
@@ -206,6 +223,15 @@ def compare_articles(urls):
                     standardized_jaccard = (1 - jaccard_similarity) * 100
                     jaccard_distances.append(standardized_jaccard)
 
+            # Calculate cosine similarity between filtered sentences using TF-IDF
+            vectorizer = TfidfVectorizer().fit_transform(sentences_by_url[url1]['filtered_sentences'] + sentences_by_url[url2]['filtered_sentences'])
+            vectors = vectorizer.toarray()
+            num_sentences_url1 = len(sentences_by_url[url1]['filtered_sentences'])
+            for k in range(num_sentences_url1):
+                for l in range(num_sentences_url1, len(vectors)):
+                    similarity = cosine_similarity([vectors[k]], [vectors[l]])[0][0]
+                    cosine_similarities.append(similarity * 100)
+
             # Calculate average standardized distances and 95% confidence intervals for this pair
             avg_levenstein_distance = np.mean(levenstein_distances)
             std_error_levenstein = stats.sem(levenstein_distances)
@@ -215,35 +241,53 @@ def compare_articles(urls):
             std_error_jaccard = stats.sem(jaccard_distances)
             confidence_interval_jaccard = stats.t.interval(0.95, len(jaccard_distances) - 1, loc=avg_jaccard_distance, scale=std_error_jaccard)
 
-            results.append((url1, url2, avg_levenstein_distance, confidence_interval_levenstein, avg_jaccard_distance, confidence_interval_jaccard))
+            avg_cosine_similarity = np.mean(cosine_similarities)
+            std_error_cosine = stats.sem(cosine_similarities)
+            confidence_interval_cosine = stats.t.interval(0.95, len(cosine_similarities) - 1, loc=avg_cosine_similarity, scale=std_error_cosine)
 
-    return results
+            sent_difference = abs(sentiment_scores[url1] - sentiment_scores[url2])
+            results.append((url1, url2, avg_levenstein_distance, confidence_interval_levenstein, avg_jaccard_distance, confidence_interval_jaccard, avg_cosine_similarity, confidence_interval_cosine, sent_difference))
+
+    return results, sentiment_scores
 
 # Example usage of reading URLs from a file
 urls = read_urls_from_file("sample_urls1.txt")
 if isinstance(urls, list):
-    comparison_results = compare_articles(urls)
+    comparison_results, sentiment_scores = compare_articles(urls)
     for result in comparison_results:
         (url1, url2, avg_levenstein_distance, confidence_interval_levenstein, avg_jaccard_distance, 
-        confidence_interval_jaccard) = result
+        confidence_interval_jaccard, avg_cosine_similarity, confidence_interval_cosine, sent_difference) = result
         print(f"Comparison between {url1} and {url2}:")
         print(f"Average Standardized Levenshtein Distance: {avg_levenstein_distance}")
         print(f"95% Confidence Interval for Levenshtein Distance: {confidence_interval_levenstein}")
         print(f"Average Standardized Jaccard Distance: {avg_jaccard_distance}")
         print(f"95% Confidence Interval for Jaccard Distance: {confidence_interval_jaccard}")
+        print(f"Average Cosine Similarity: {avg_cosine_similarity}")
+        print(f"95% Confidence Interval for Cosine Similarity: {confidence_interval_cosine}")
+        print(f"Sent difference:  {sent_difference}")
+
+    # Print sentiment scores for each URL
+    print("\nSentiment Analysis Scores:")
+    for url, score in sentiment_scores.items():
+        print(f"{url}: Sentiment Score: {score}")
 
     # Determine top 3 best matches and bottom 3 worst matches for each metric
-    metrics = ['avg_levenstein_distance', 'avg_jaccard_distance']
+    metrics = ['avg_levenstein_distance', 'avg_jaccard_distance', 'avg_cosine_similarity' , 'sent_difference']
     for metric in metrics:
         if metric == 'avg_levenstein_distance':
             sorted_results = sorted(comparison_results, key=lambda x: x[2])
         elif metric == 'avg_jaccard_distance':
             sorted_results = sorted(comparison_results, key=lambda x: x[4])
+        elif metric == 'avg_cosine_similarity':
+            sorted_results = sorted(comparison_results, key=lambda x: x[6], reverse=True)  # Higher is better for cosine similarity
+        elif metric == 'sent_difference':
+            sorted_results = sorted(comparison_results, key=lambda x: x[8], reverse=True)
+
         print(f"\nTop 3 best matches for {metric}:")
         for best_match in sorted_results[:3]:
-            print(f"{best_match[0]} vs {best_match[1]}: {best_match[2 if metric == 'avg_levenstein_distance' else 4]}")
+            print(f"{best_match[0]} vs {best_match[1]}: {best_match[2 if metric == 'avg_levenstein_distance' else 4 if metric == 'avg_jaccard_distance' else 6 if metric == 'avg_cosine_similarity' else 8]}")
         print(f"\nBottom 3 worst matches for {metric}:")
         for worst_match in sorted_results[-3:]:
-            print(f"{worst_match[0]} vs {worst_match[1]}: {worst_match[2 if metric == 'avg_levenstein_distance' else 4]}")
+            print(f"{worst_match[0]} vs {worst_match[1]}: {worst_match[2 if metric == 'avg_levenstein_distance' else 4 if metric == 'avg_jaccard_distance' else 6 if metric == 'avg_cosine_similarity' else 8]}")
 else:
     print(urls)
