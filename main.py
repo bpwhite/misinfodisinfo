@@ -5,14 +5,18 @@ from bs4 import BeautifulSoup
 import re
 import nltk
 from nltk import pos_tag, word_tokenize, sent_tokenize
+from nltk.corpus import stopwords
 from nltk.metrics import edit_distance
 import json
 import os
 import scipy.stats as stats
-# a
+from sklearn.metrics import jaccard_score
+from tqdm import tqdm
+
 # Download NLTK data files (only required once)
 nltk.download('punkt')
 nltk.download('averaged_perceptron_tagger')
+nltk.download('stopwords')
 
 # Cache file to store downloaded content persistently
 CACHE_FILE = "url_cache.json"
@@ -23,6 +27,13 @@ if os.path.exists(CACHE_FILE):
         url_cache = json.load(cache_file)
 else:
     url_cache = {}
+
+# Variable to limit the number of articles imported to analyze
+MAX_ARTICLES = 10
+# Variable to limit the minimum sentence length for analysis (after stop words are removed)
+MIN_SENTENCE_LENGTH = 8
+# Stop words set
+STOP_WORDS = set(stopwords.words('english'))
 
 def save_cache():
     with open(CACHE_FILE, 'w') as cache_file:
@@ -100,6 +111,13 @@ def grab_and_clean_text_from_website(url):
     except requests.exceptions.RequestException as e:
         return f"An error occurred: {e}"
 
+def remove_stop_words(sentence):
+    # Tokenize the sentence
+    tokens = word_tokenize(sentence)
+    # Remove stop words
+    filtered_tokens = [word for word in tokens if word.lower() not in STOP_WORDS]
+    return ' '.join(filtered_tokens)
+
 def convert_sentence_to_grammar_tokens(sentence):
     # Tokenize the sentence
     tokens = word_tokenize(sentence)
@@ -116,10 +134,17 @@ def process_text_and_align_tokens(url, known_tokens):
     # Step 2: Split the text into sentences
     sentences = sent_tokenize(cleaned_text)
     
-    # Step 3: Convert each sentence to grammar tokens
-    tokenized_sentences = [convert_sentence_to_grammar_tokens(sentence) for sentence in sentences]
+    # Step 3: Remove stop words and filter sentences by minimum length
+    filtered_sentences = []
+    for sentence in sentences:
+        filtered_sentence = remove_stop_words(sentence)
+        if len(filtered_sentence.split()) >= MIN_SENTENCE_LENGTH:
+            filtered_sentences.append(filtered_sentence)
     
-    # Step 4: Align grammar tokens to the known set of grammar tokens
+    # Step 4: Convert each sentence to grammar tokens
+    tokenized_sentences = [convert_sentence_to_grammar_tokens(sentence) for sentence in filtered_sentences]
+    
+    # Step 5: Align grammar tokens to the known set of grammar tokens
     aligned_results = []
     for tagged_tokens in tokenized_sentences:
         sentence_tokens = [tag for word, tag in tagged_tokens]
@@ -133,49 +158,92 @@ def read_urls_from_file(file_path):
     try:
         with open(file_path, 'r') as file:
             urls = [line.strip() for line in file.readlines()]
-        return urls
+        return urls[:MAX_ARTICLES]  # Limit the number of articles to analyze
     except FileNotFoundError as e:
         return f"An error occurred: {e}"
 
-def compare_articles_using_levenshtein(urls):
+def compare_articles(urls):
     sentences_by_url = {}
 
     # Step 1: Extract and tokenize sentences for each URL
-    for url in urls:
+    for url in tqdm(urls, desc="Extracting and tokenizing sentences"):
         cleaned_text = grab_and_clean_text_from_website(url)
         sentences = sent_tokenize(cleaned_text)
-        tokenized_sentences = [convert_sentence_to_grammar_tokens(sentence) for sentence in sentences]
-        sentences_by_url[url] = tokenized_sentences
+        # Remove stop words and filter sentences by minimum length
+        filtered_sentences = []
+        for sentence in sentences:
+            filtered_sentence = remove_stop_words(sentence)
+            if len(filtered_sentence.split()) >= MIN_SENTENCE_LENGTH:
+                filtered_sentences.append(filtered_sentence)
+        tokenized_sentences = [convert_sentence_to_grammar_tokens(sentence) for sentence in filtered_sentences]
+        sentences_by_url[url] = {'tokenized': tokenized_sentences}
 
     # Step 2: Pairwise comparison between articles
     results = []
     urls_list = list(sentences_by_url.keys())
-    for i in range(len(urls_list)):
+    for i in tqdm(range(len(urls_list)), desc="Comparing articles", unit="pair"):
         for j in range(i + 1, len(urls_list)):
             url1, url2 = urls_list[i], urls_list[j]
-            distances = []
-            for sent1 in sentences_by_url[url1]:
-                for sent2 in sentences_by_url[url2]:
+            levenstein_distances = []
+            jaccard_distances = []
+
+            # Compare grammar tokenized sentences
+            for sent1 in tqdm(sentences_by_url[url1]['tokenized'], desc=f"Comparing tokenized sentences between {url1} and {url2}", leave=False):
+                for sent2 in sentences_by_url[url2]['tokenized']:
                     tokens1 = [tag for word, tag in sent1]
                     tokens2 = [tag for word, tag in sent2]
-                    distance = edit_distance(tokens1, tokens2)
-                    distances.append(distance)
-            # Calculate average Levenshtein distance and 95% confidence interval for this pair
-            avg_distance = np.mean(distances)
-            std_error = stats.sem(distances)
-            confidence_interval = stats.t.interval(0.95, len(distances) - 1, loc=avg_distance, scale=std_error)
-            results.append((url1, url2, avg_distance, confidence_interval))
+                    # Calculate Levenshtein distance and standardize it to 100
+                    max_len = max(len(tokens1), len(tokens2))
+                    levenstein_distance = edit_distance(tokens1, tokens2)
+                    standardized_levenstein = (levenstein_distance / max_len) * 100 if max_len > 0 else 0
+                    levenstein_distances.append(standardized_levenstein)
+                    # Calculate Jaccard distance and standardize it to 100
+                    set1 = set(tokens1)
+                    set2 = set(tokens2)
+                    intersection = len(set1 & set2)
+                    union = len(set1 | set2)
+                    jaccard_similarity = (intersection / union) if union != 0 else 1
+                    standardized_jaccard = (1 - jaccard_similarity) * 100
+                    jaccard_distances.append(standardized_jaccard)
+
+            # Calculate average standardized distances and 95% confidence intervals for this pair
+            avg_levenstein_distance = np.mean(levenstein_distances)
+            std_error_levenstein = stats.sem(levenstein_distances)
+            confidence_interval_levenstein = stats.t.interval(0.95, len(levenstein_distances) - 1, loc=avg_levenstein_distance, scale=std_error_levenstein)
+
+            avg_jaccard_distance = np.mean(jaccard_distances)
+            std_error_jaccard = stats.sem(jaccard_distances)
+            confidence_interval_jaccard = stats.t.interval(0.95, len(jaccard_distances) - 1, loc=avg_jaccard_distance, scale=std_error_jaccard)
+
+            results.append((url1, url2, avg_levenstein_distance, confidence_interval_levenstein, avg_jaccard_distance, confidence_interval_jaccard))
 
     return results
 
 # Example usage of reading URLs from a file
 urls = read_urls_from_file("sample_urls1.txt")
 if isinstance(urls, list):
-    comparison_results = compare_articles_using_levenshtein(urls)
+    comparison_results = compare_articles(urls)
     for result in comparison_results:
-        url1, url2, avg_distance, confidence_interval = result
+        (url1, url2, avg_levenstein_distance, confidence_interval_levenstein, avg_jaccard_distance, 
+        confidence_interval_jaccard) = result
         print(f"Comparison between {url1} and {url2}:")
-        print(f"Average Levenshtein Distance: {avg_distance}")
-        print(f"95% Confidence Interval: {confidence_interval}")
+        print(f"Average Standardized Levenshtein Distance: {avg_levenstein_distance}")
+        print(f"95% Confidence Interval for Levenshtein Distance: {confidence_interval_levenstein}")
+        print(f"Average Standardized Jaccard Distance: {avg_jaccard_distance}")
+        print(f"95% Confidence Interval for Jaccard Distance: {confidence_interval_jaccard}")
+
+    # Determine top 3 best matches and bottom 3 worst matches for each metric
+    metrics = ['avg_levenstein_distance', 'avg_jaccard_distance']
+    for metric in metrics:
+        if metric == 'avg_levenstein_distance':
+            sorted_results = sorted(comparison_results, key=lambda x: x[2])
+        elif metric == 'avg_jaccard_distance':
+            sorted_results = sorted(comparison_results, key=lambda x: x[4])
+        print(f"\nTop 3 best matches for {metric}:")
+        for best_match in sorted_results[:3]:
+            print(f"{best_match[0]} vs {best_match[1]}: {best_match[2 if metric == 'avg_levenstein_distance' else 4]}")
+        print(f"\nBottom 3 worst matches for {metric}:")
+        for worst_match in sorted_results[-3:]:
+            print(f"{worst_match[0]} vs {worst_match[1]}: {worst_match[2 if metric == 'avg_levenstein_distance' else 4]}")
 else:
     print(urls)
