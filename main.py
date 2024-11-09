@@ -5,12 +5,28 @@ from bs4 import BeautifulSoup
 import re
 import nltk
 from nltk import pos_tag, word_tokenize, sent_tokenize
+from nltk.metrics import edit_distance
+import json
+import os
+import scipy.stats as stats
 
 # Download NLTK data files (only required once)
 nltk.download('punkt')
-nltk.download('punkt_tab')
 nltk.download('averaged_perceptron_tagger')
-nltk.download('averaged_perceptron_tagger_eng')
+
+# Cache file to store downloaded content persistently
+CACHE_FILE = "url_cache.json"
+
+# Load cache from file if it exists
+if os.path.exists(CACHE_FILE):
+    with open(CACHE_FILE, 'r') as cache_file:
+        url_cache = json.load(cache_file)
+else:
+    url_cache = {}
+
+def save_cache():
+    with open(CACHE_FILE, 'w') as cache_file:
+        json.dump(url_cache, cache_file)
 
 def align_sentences(sentence1, sentence2):
     words1 = sentence1.split()
@@ -58,6 +74,9 @@ def align_sentences(sentence1, sentence2):
     return ' '.join(aligned_sentence1), ' '.join(aligned_sentence2)
 
 def grab_and_clean_text_from_website(url):
+    if url in url_cache:
+        return url_cache[url]
+    
     try:
         # Fetch the website content
         response = requests.get(url)
@@ -72,6 +91,10 @@ def grab_and_clean_text_from_website(url):
         # Clean the text by removing extra whitespace and non-alphanumeric characters
         cleaned_text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces with a single space
         cleaned_text = re.sub(r'[^\w\s\.,!?]', '', cleaned_text)  # Remove non-alphanumeric characters except punctuation
+        
+        # Store the cleaned text in the cache
+        url_cache[url] = cleaned_text.strip()
+        save_cache()
         
         return cleaned_text.strip()
     except requests.exceptions.RequestException as e:
@@ -106,28 +129,53 @@ def process_text_and_align_tokens(url, known_tokens):
     
     return aligned_results
 
-# Example usage
-sentence1 = "The quick brown fox jumps over the lazy dog"
-sentence2 = "A fast brown animal jumps over a sleeping dog"
+def read_urls_from_file(file_path):
+    try:
+        with open(file_path, 'r') as file:
+            urls = [line.strip() for line in file.readlines()]
+        return urls
+    except FileNotFoundError as e:
+        return f"An error occurred: {e}"
 
-aligned1, aligned2 = align_sentences(sentence1, sentence2)
-print("Aligned Sentence 1:", aligned1)
-print("Aligned Sentence 2:", aligned2)
+def compare_articles_using_levenshtein(urls):
+    sentences_by_url = {}
 
-# Example usage of grab_and_clean_text_from_website
-url = "https://www.example.com"
-cleaned_text = grab_and_clean_text_from_website(url)
-print("Cleaned Text from Website:", cleaned_text)
+    # Step 1: Extract and tokenize sentences for each URL
+    for url in urls:
+        cleaned_text = grab_and_clean_text_from_website(url)
+        sentences = sent_tokenize(cleaned_text)
+        tokenized_sentences = [convert_sentence_to_grammar_tokens(sentence) for sentence in sentences]
+        sentences_by_url[url] = tokenized_sentences
 
-# Example usage of convert_sentence_to_grammar_tokens
-sentence = "The quick brown fox jumps over the lazy dog"
-grammar_tokens = convert_sentence_to_grammar_tokens(sentence)
-print("Grammar Tokens:", grammar_tokens)
+    # Step 2: Pairwise comparison between articles
+    results = []
+    urls_list = list(sentences_by_url.keys())
+    for i in range(len(urls_list)):
+        for j in range(i + 1, len(urls_list)):
+            url1, url2 = urls_list[i], urls_list[j]
+            distances = []
+            for sent1 in sentences_by_url[url1]:
+                for sent2 in sentences_by_url[url2]:
+                    tokens1 = [tag for word, tag in sent1]
+                    tokens2 = [tag for word, tag in sent2]
+                    distance = edit_distance(tokens1, tokens2)
+                    distances.append(distance)
+            # Calculate average Levenshtein distance and 95% confidence interval for this pair
+            avg_distance = np.mean(distances)
+            std_error = stats.sem(distances)
+            confidence_interval = stats.t.interval(0.95, len(distances) - 1, loc=avg_distance, scale=std_error)
+            results.append((url1, url2, avg_distance, confidence_interval))
 
-# Example usage of process_text_and_align_tokens
-known_tokens = convert_sentence_to_grammar_tokens("The quick brown fox jumps over the lazy dog")
-aligned_token_results = process_text_and_align_tokens(url, known_tokens)
-for aligned_sentence, aligned_known in aligned_token_results:
-    print("Aligned Grammar Tokens:")
-    print("Sentence:", aligned_sentence)
-    print("Known Tokens:", aligned_known)
+    return results
+
+# Example usage of reading URLs from a file
+urls = read_urls_from_file("sample_urls1.txt")
+if isinstance(urls, list):
+    comparison_results = compare_articles_using_levenshtein(urls)
+    for result in comparison_results:
+        url1, url2, avg_distance, confidence_interval = result
+        print(f"Comparison between {url1} and {url2}:")
+        print(f"Average Levenshtein Distance: {avg_distance}")
+        print(f"95% Confidence Interval: {confidence_interval}")
+else:
+    print(urls)
