@@ -13,6 +13,9 @@ import matplotlib.pyplot as plt
 from urllib.parse import urlparse
 from nltk.corpus import stopwords
 from sklearn.preprocessing import StandardScaler
+import configparser
+import time
+import pyphen
 
 # Download necessary NLTK data
 nltk.download('punkt')
@@ -22,6 +25,10 @@ nltk.download('stopwords')
 # Cache file path
 CACHE_FILE_PATH = 'url_cache.json'
 STOP_WORDS = set(stopwords.words('english'))
+
+# Config file paths
+CONFIG_FILE_PATH = 'metrics_config.ini'
+DOMAIN_COLOR_CONFIG_FILE = 'domain_color_config.ini'
 
 # Load the cache
 def load_cache():
@@ -34,6 +41,18 @@ def load_cache():
 def save_cache(cache):
     with open(CACHE_FILE_PATH, 'w') as f:
         json.dump(cache, f)
+
+# Load the configuration
+def load_config():
+    config = configparser.ConfigParser()
+    config.read(CONFIG_FILE_PATH)
+    return config['METRICS'] if 'METRICS' in config else {}
+
+# Load the domain color configuration
+def load_domain_color_config():
+    color_config = configparser.ConfigParser()
+    color_config.read(DOMAIN_COLOR_CONFIG_FILE)
+    return color_config['COLORS'] if 'COLORS' in color_config else {}
 
 # Function to get cleaned text from a URL
 def get_cleaned_text(url, cache):
@@ -50,60 +69,89 @@ def get_cleaned_text(url, cache):
         cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
         cache[url] = cleaned_text
         save_cache(cache)
+        time.sleep(1)
         return cleaned_text
     except requests.exceptions.RequestException as e:
         print(f"Error fetching URL {url}: {e}")
         return ""
 
 # Function to calculate linguistic metrics
-def calculate_metrics(text, min_sentence_length=5):
+def calculate_metrics(text, config, min_sentence_length=5):
     word_list = [word for word in text.split() if word.lower() not in STOP_WORDS]
     sentence_list = re.split(r'[.!?]', text)
     sentence_list = [sentence.strip() for sentence in sentence_list if len(sentence.split()) >= min_sentence_length]
     word_count = len(word_list)
     sentence_count = len(sentence_list)
-    average_word_length = sum(len(word) for word in word_list) / word_count if word_count > 0 else 0
-    unique_words = set(word_list)
-    lexical_diversity = len(unique_words) / word_count if word_count > 0 else 0
-    avg_sentence_length = word_count / sentence_count if sentence_count > 0 else 0
+    metrics = {}
+
+    if config.getboolean('word_count', fallback=True):
+        metrics["Word Count"] = word_count
+    if config.getboolean('sentence_count', fallback=True):
+        metrics["Sentence Count"] = sentence_count
+    if config.getboolean('average_word_length', fallback=True):
+        metrics["Average Word Length"] = sum(len(word) for word in word_list) / word_count if word_count > 0 else 0
+    if config.getboolean('lexical_diversity', fallback=True):
+        unique_words = set(word_list)
+        metrics["Lexical Diversity"] = len(unique_words) / word_count if word_count > 0 else 0
+    if config.getboolean('average_sentence_length', fallback=True):
+        metrics["Average Sentence Length"] = word_count / sentence_count if sentence_count > 0 else 0
+    
     pos_counts = Counter()
+    all_pos_tags = []
     for sentence in sentence_list:
         tokens = word_tokenize(sentence)
         tokens = [word for word in tokens if word.lower() not in STOP_WORDS]
         pos_tags = pos_tag(tokens)
         pos_counts.update(tag for word, tag in pos_tags)
-    avg_nouns = pos_counts['NN'] / sentence_count if sentence_count > 0 else 0
-    avg_verbs = pos_counts['VB'] / sentence_count if sentence_count > 0 else 0
-    avg_adverbs = pos_counts['RB'] / sentence_count if sentence_count > 0 else 0
-    avg_adjectives = pos_counts['JJ'] / sentence_count if sentence_count > 0 else 0
-    num_adverbs_adjectives = pos_counts['RB'] + pos_counts['JJ']
-    num_nouns_verbs = pos_counts['NN'] + pos_counts['VB']
-    ratio_adverbs_adjectives = (num_adverbs_adjectives / num_nouns_verbs) if num_nouns_verbs > 0 else 0
-    sentiment_scores = [TextBlob(sentence).sentiment.polarity for sentence in sentence_list]
-    avg_sentiment = sum(sentiment_scores) / len(sentiment_scores) if sentiment_scores else 0
-    total_characters = sum(len(word) for word in word_list)
-    avg_characters_per_sentence = total_characters / sentence_count if sentence_count > 0 else 0
-    unique_word_ratio = len(unique_words) / word_count if word_count > 0 else 0
-    return {
-        "Word Count": word_count,
-        "Sentence Count": sentence_count,
-        "Average Word Length": average_word_length,
-        "Lexical Diversity": lexical_diversity,
-        "Average Sentence Length": avg_sentence_length,
-        "Average Nouns per Sentence": avg_nouns,
-        "Average Verbs per Sentence": avg_verbs,
-        "Average Adverbs per Sentence": avg_adverbs,
-        "Average Adjectives per Sentence": avg_adjectives,
-        "Average Ratio of Adverbs and Adjectives to Nouns and Verbs": ratio_adverbs_adjectives,
-        "Average Sentiment": avg_sentiment,
-        "Average Characters per Sentence": avg_characters_per_sentence,
-        "Unique Word Ratio": unique_word_ratio
-    }
+        all_pos_tags.extend(pos_tags)
+    
+    if config.getboolean('average_nouns', fallback=True):
+        metrics["Average Nouns per Sentence"] = pos_counts['NN'] / sentence_count if sentence_count > 0 else 0
+    if config.getboolean('average_verbs', fallback=True):
+        metrics["Average Verbs per Sentence"] = pos_counts['VB'] / sentence_count if sentence_count > 0 else 0
+    if config.getboolean('average_adverbs', fallback=True):
+        metrics["Average Adverbs per Sentence"] = pos_counts['RB'] / sentence_count if sentence_count > 0 else 0
+    if config.getboolean('average_adjectives', fallback=True):
+        metrics["Average Adjectives per Sentence"] = pos_counts['JJ'] / sentence_count if sentence_count > 0 else 0
+    if config.getboolean('ratio_adverbs_adjectives', fallback=True):
+        num_adverbs_adjectives = pos_counts['RB'] + pos_counts['JJ']
+        num_nouns_verbs = pos_counts['NN'] + pos_counts['VB']
+        metrics["Average Ratio of Adverbs and Adjectives to Nouns and Verbs"] = (num_adverbs_adjectives / num_nouns_verbs) if num_nouns_verbs > 0 else 0
+    if config.getboolean('average_sentiment', fallback=True):
+        sentiment_scores = [TextBlob(sentence).sentiment.polarity for sentence in sentence_list]
+        metrics["Average Sentiment"] = sum(sentiment_scores) / len(sentiment_scores) if sentiment_scores else 0
+    if config.getboolean('average_characters_per_sentence', fallback=True):
+        total_characters = sum(len(word) for word in word_list)
+        metrics["Average Characters per Sentence"] = total_characters / sentence_count if sentence_count > 0 else 0
+    if config.getboolean('unique_word_ratio', fallback=True):
+        unique_words = set(word_list)
+        metrics["Unique Word Ratio"] = len(unique_words) / word_count if word_count > 0 else 0
+    if config.getboolean('type_token_ratio', fallback=True):
+        metrics["Type-Token Ratio"] = len(set(word_list)) / len(word_list) if word_list else 0
+    if config.getboolean('syllable_count_per_word', fallback=True):
+        dic = pyphen.Pyphen(lang='en')
+        metrics["Syllable Count per Word"] = sum(len(dic.inserted(word).split('-')) for word in word_list) / word_count if word_count > 0 else 0
+    if config.getboolean('polysyllabic_word_count', fallback=True):
+        dic = pyphen.Pyphen(lang='en')
+        metrics["Polysyllabic Word Count"] = sum(1 for word in word_list if len(dic.inserted(word).split('-')) >= 3)
+    if config.getboolean('passive_voice_frequency', fallback=True):
+        metrics["Passive Voice Frequency"] = sum(1 for sentence in sentence_list if 'by' in sentence and ('was' in sentence or 'were' in sentence)) / sentence_count if sentence_count > 0 else 0
+    if config.getboolean('pronoun_use', fallback=True):
+        metrics["Pronoun Use"] = sum(1 for word, tag in all_pos_tags if tag.startswith('PRP')) / word_count if word_count > 0 else 0
+    if config.getboolean('named_entity_count', fallback=True):
+        named_entity_count = len(re.findall(r'\b[A-Z][a-z]*\b', text))  # Approximate method for named entity count
+        metrics["Named Entity Count"] = named_entity_count
+    
+    return metrics
 
 # Main function to perform PCA
 def main():
     # Load cache
     cache = load_cache()
+
+    # Load configuration
+    config = load_config()
+    domain_color_config = load_domain_color_config()
 
     # Read URLs from file
     try:
@@ -118,7 +166,7 @@ def main():
     labels = []
     for url in urls:
         text = get_cleaned_text(url, cache)
-        metrics = calculate_metrics(text)
+        metrics = calculate_metrics(text, config)
         metrics_list.append(list(metrics.values()))
         domain = urlparse(url).netloc
         labels.append(domain)
@@ -135,17 +183,15 @@ def main():
     pca_result = pca.fit_transform(standardized_metrics)
 
     # Plot PCA result with color coding by domain
-    unique_domains = list(set(labels))
-    domain_colors = {domain: plt.cm.jet(float(i) / len(unique_domains)) for i, domain in enumerate(unique_domains)}
-    
     plt.figure(figsize=(10, 8))
     for i, label in enumerate(labels):
-        plt.scatter(pca_result[i, 0], pca_result[i, 1], color=domain_colors[label], alpha=0.6)
+        color = domain_color_config.get(label, plt.cm.jet(float(i) / len(set(labels))))
+        plt.scatter(pca_result[i, 0], pca_result[i, 1], color=color, alpha=0.6)
     
     plt.xlabel('Principal Component 1')
     plt.ylabel('Principal Component 2')
     plt.title('PCA Analysis of Linguistic Metrics by Domain (Color Coded)')
-    plt.legend(handles=[plt.Line2D([0], [0], marker='o', color='w', label=domain, markersize=10, markerfacecolor=color) for domain, color in domain_colors.items()], bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.legend(handles=[plt.Line2D([0], [0], marker='o', color='w', label=domain, markersize=10, markerfacecolor=domain_color_config.get(domain, 'gray')) for domain in set(labels)], bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.show()
 
     # Print PCA statistical results
