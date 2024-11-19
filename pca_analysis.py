@@ -164,12 +164,12 @@ def main():
     # Calculate metrics for each URL
     metrics_list = []
     labels = []
-    for url in urls:
+    for idx, url in enumerate(urls, start=1):
         text = get_cleaned_text(url, cache)
         metrics = calculate_metrics(text, config)
         metrics_list.append(list(metrics.values()))
         domain = urlparse(url).netloc
-        labels.append(domain)
+        labels.append(f"Article {idx}: {domain}")
 
     # Convert metrics to DataFrame
     metrics_df = pd.DataFrame(metrics_list, columns=list(metrics.keys()))
@@ -185,13 +185,14 @@ def main():
     # Plot PCA result with color coding by domain
     plt.figure(figsize=(10, 8))
     for i, label in enumerate(labels):
-        color = domain_color_config.get(label, plt.cm.jet(float(i) / len(set(labels))))
+        color = domain_color_config.get(label.split(': ')[1], plt.cm.jet(float(i) / len(set(labels))))
         plt.scatter(pca_result[i, 0], pca_result[i, 1], color=color, alpha=0.6)
+        plt.text(pca_result[i, 0], pca_result[i, 1], str(i + 1), fontsize=9, ha='right')  # Add article number to the plot
     
     plt.xlabel('Principal Component 1')
     plt.ylabel('Principal Component 2')
     plt.title('PCA Analysis of Linguistic Metrics by Domain (Color Coded)')
-    plt.legend(handles=[plt.Line2D([0], [0], marker='o', color='w', label=domain, markersize=10, markerfacecolor=domain_color_config.get(domain, 'gray')) for domain in set(labels)], bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.legend(handles=[plt.Line2D([0], [0], marker='o', color='w', label=label, markersize=10, markerfacecolor=domain_color_config.get(label.split(': ')[1], 'gray')) for label in labels], bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.show()
 
     # Print PCA statistical results
